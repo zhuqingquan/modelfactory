@@ -12,6 +12,7 @@ import torch
 
 from model_utils import *
 from MobileNetV3 import MobileNetV3, MobileNetV3Large
+from tqdm import tqdm
 
 # 改进的数据增强
 def get_transforms():
@@ -120,16 +121,21 @@ def train_with_ImageNet(net, num_classes=1000):
     #num_classes = 1000 #ImageNet数据集包含1000中类型的图片
     #==================加载ImageNet数据集==============================
     # 使用ImageNet特定的数据增强
+    print(f"start load data for train. path={args.data_dir}")
     train_transform = get_imagenet_transforms(train=True)
     test_transform = get_imagenet_transforms(train=False)
     train_data = ImageFolder(
         root=os.path.join(args.data_dir, 'train'),
         transform=train_transform
     )
+    print(f"load data for train done. path={args.data_dir}")
+    print(f"start load data for val. path={args.data_dir}")
+    train_transform = get_imagenet_transforms(train=True)
     test_data = ImageFolder(
         root=os.path.join(args.data_dir, 'val'),
         transform=test_transform
     )
+    print(f"load data for val done. path={args.data_dir}")
     
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=8)
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=8)
@@ -143,8 +149,9 @@ def train_with_ImageNet(net, num_classes=1000):
         running_loss = 0.0
         correct = 0
         total = 0
-        
-        for img, label in train_loader:
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epoch_max}')
+        for batch_idx, (img, label) in enumerate(pbar):
+        #for batch_idx,(img, label) in enumerate(tqdm(train_loader)):
             img = img.to(device)
             label = label.to(device)
             
