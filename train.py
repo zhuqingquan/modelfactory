@@ -13,6 +13,7 @@ import torch
 from model_utils import *
 from MobileNetV3 import MobileNetV3, MobileNetV3Large
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 # 改进的数据增强
 def get_transforms():
@@ -64,7 +65,9 @@ def load_weight(net, pth_file, map_location = None):
         loaded = True
     return loaded,net,start_epoch
 
-def test_net(net, test_loader):
+writer = SummaryWriter('runs/mobilenetv3_imagenet_dataparallel_batchsize_20_train')
+
+def test_net(net, test_loader, epoch = 0):
     net.eval()
     test_correct = 0
     test_total = 0
@@ -80,6 +83,7 @@ def test_net(net, test_loader):
     
     test_accuracy = test_correct / test_total
     print(f"Test Accuracy: {test_accuracy:.4f} ({test_correct}/{test_total})")
+    writer.add_scalar('Acc/val', test_accuracy, epoch)
 
 def train_with_CIFAR10(net, num_classes=10):
     batch_size = 148  # CIFAR10数据集
@@ -116,8 +120,8 @@ def train_with_CIFAR10(net, num_classes=10):
     test_net(net, test_loader=test_loader)
 
 def train_with_ImageNet(net, num_classes=1000):
-    batch_size = 256    # ImageNet数据集
-    epoch_max = 100
+    batch_size = 200    # ImageNet数据集
+    epoch_max = 20
     #num_classes = 1000 #ImageNet数据集包含1000中类型的图片
     #==================加载ImageNet数据集==============================
     # 使用ImageNet特定的数据增强
@@ -137,8 +141,8 @@ def train_with_ImageNet(net, num_classes=1000):
     )
     print(f"load data for val done. path={args.data_dir}")
     
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=8)
-    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=8)
+    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=12)
+    test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=12)
     # ---------------for ImageNet------------------
     # 使用更适合ImageNet的优化器设置
     optimizer = torch.optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
@@ -165,16 +169,26 @@ def train_with_ImageNet(net, num_classes=1000):
             _, predicted = output.max(1)
             total += label.size(0)
             correct += predicted.eq(label).sum().item()
+            #print(f'Epoch: {epoch} batch_idx: {batch_idx} running_loss: {running_loss} running_acc: {100. * correct / total}')
         
         train_acc = 100. * correct / total
         avg_loss = running_loss / len(train_loader)
         
         print(f"Epoch: {epoch + 1}, Loss: {avg_loss:.4f}, Train Acc: {train_acc:.2f}%")
         scheduler.step()
+        os.makedirs('temp', exist_ok=True)
+        torch.save(net.state_dict(), f'temp/mobilenetv3_epoch{epoch}.pth')
+        print(f"Model saved to temp/mobilenetv3_epoch{epoch}.pth")
+
+        writer.add_scalar('Loss/train', avg_loss, epoch)
+        writer.add_scalar('Acc/train', train_acc, epoch)
+        writer.add_scalar('Learning Rate', optimizer.param_groups[0]['lr'], epoch)
     # Test the model
     test_net(net, test_loader=test_loader)
 
+#os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
 if __name__ == '__main__':
+    print(torch.cuda.is_available())
     import argparse
     
     # Parse command line arguments
@@ -184,11 +198,20 @@ if __name__ == '__main__':
     parser.add_argument('--export-onnx-path', type=str, help='Path to save ONNX model')
     args = parser.parse_args()
 
-    device = torch.device('cuda')
+    ##==================创建net==============================
+    device_ids = list(range(torch.cuda.device_count()))
+    print(f'可用GPU：{device_ids}')
+    #for i in device_ids:
+    #    prop = torch.cuda.get_device_properties(i)
+    #    print(f'GPU {i} : {prop.name}, 显存： {prop.total_memory / 1024**3:.2f}')
+    net = MobileNetV3(num_classes=1000)
+    net = nn.DataParallel(net, device_ids=device_ids)
+    device = torch.device(f'cuda:{device_ids[0]}')
+    net.to(device)
 
-    #==================创建net==============================
-    #net = MobileNetV3Large(num_classes=10).to(device)
-    net = MobileNetV3(num_classes=1000).to(device)
+    #device = torch.device(f'cuda')
+    ##net = MobileNetV3Large(num_classes=10).to(device)
+    #net = MobileNetV3(num_classes=1000).to(device)
     loaded,net,startEpoch = load_weight(net, args.pth_file, device)
     if loaded:
         print(f"load model weight success. file={args.pth_file}")
