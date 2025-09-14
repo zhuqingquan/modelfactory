@@ -65,7 +65,7 @@ def load_weight(net, pth_file, map_location = None):
         loaded = True
     return loaded,net,start_epoch
 
-writer = SummaryWriter('runs/mobilenetv3_imagenet_dataparallel_batchsize_20_train')
+writer = SummaryWriter('runs/mobilenetv3_imagenet_dataparallel_batchsize_20_train_amp_epoch_384')
 
 def test_net(net, test_loader, epoch = 0):
     net.eval()
@@ -119,9 +119,8 @@ def train_with_CIFAR10(net, num_classes=10):
     # Test the model
     test_net(net, test_loader=test_loader)
 
-def train_with_ImageNet(net, num_classes=1000):
-    batch_size = 200    # ImageNet数据集
-    epoch_max = 20
+from torch.amp import autocast, GradScaler
+def train_with_ImageNet(net, num_classes=1000, batch_size=200, epoch_max=20):
     #num_classes = 1000 #ImageNet数据集包含1000中类型的图片
     #==================加载ImageNet数据集==============================
     # 使用ImageNet特定的数据增强
@@ -147,6 +146,7 @@ def train_with_ImageNet(net, num_classes=1000):
     # 使用更适合ImageNet的优化器设置
     optimizer = torch.optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+    scaler = GradScaler() #使用梯度缩放器，用于混合精度訓練
     cross = nn.CrossEntropyLoss().to(device)
     for epoch in range(epoch_max):
         net.train()
@@ -159,11 +159,15 @@ def train_with_ImageNet(net, num_classes=1000):
             img = img.to(device)
             label = label.to(device)
             
-            output = net.forward(img)
-            loss = cross(output, label)
-            loss.backward()
-            optimizer.step()
             optimizer.zero_grad()
+            with autocast(device_type='cuda'):
+                output = net.forward(img)
+                loss = cross(output, label)
+            #loss.backward()
+            scaler.scale(loss).backward() # 先对loss进行scale，再backward()
+            #optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             
             running_loss += loss.item()
             _, predicted = output.max(1)
@@ -199,25 +203,26 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ##==================创建net==============================
+    ##net = MobileNetV3Large(num_classes=10)
+    net = MobileNetV3(num_classes=1000)
+
     device_ids = list(range(torch.cuda.device_count()))
     print(f'可用GPU：{device_ids}')
     #for i in device_ids:
     #    prop = torch.cuda.get_device_properties(i)
     #    print(f'GPU {i} : {prop.name}, 显存： {prop.total_memory / 1024**3:.2f}')
-    net = MobileNetV3(num_classes=1000)
-    net = nn.DataParallel(net, device_ids=device_ids)
-    device = torch.device(f'cuda:{device_ids[0]}')
-    net.to(device)
+    #net = nn.DataParallel(net, device_ids=device_ids)
+    #device = torch.device(f'cuda:{device_ids[0]}')
+    #net.to(device)
 
-    #device = torch.device(f'cuda')
-    ##net = MobileNetV3Large(num_classes=10).to(device)
-    #net = MobileNetV3(num_classes=1000).to(device)
+    device = torch.device(f'cuda')
+    net = net.to(device)
     loaded,net,startEpoch = load_weight(net, args.pth_file, device)
     if loaded:
         print(f"load model weight success. file={args.pth_file}")
     print(net)
     #train_with_CIFAR10(net)
-    train_with_ImageNet(net)
+    train_with_ImageNet(net, batch_size=200)
     
     #======================保存pth==========================
     # Create output directory and save model
