@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torchvision.datasets import ImageFolder
@@ -44,19 +45,57 @@ def get_imagenet_transforms(train=True):
                                std=[0.229, 0.224, 0.225])
         ])
 
-def load_weight(net, pth_file, map_location = None):
+def save_checkpoint_with_metadata(model, epoch, path, optimizer = None, loss = None, additional_info=None):
+    """
+    保存包含元数据的检查点
+    
+    参数:
+        model: 模型实例
+        optimizer: 优化器实例
+        epoch: 当前epoch数
+        loss: 当前损失值
+        path: 保存路径
+        additional_info: 额外的元数据字典
+    """
+    # 准备检查点数据
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        #'loss': loss,
+        'save_timestamp': datetime.now().isoformat(),  # ISO格式的时间戳
+        'save_datetime': str(datetime.now()),          # 可读的日期时间字符串
+        'pytorch_version': torch.__version__,
+        'cuda_version': torch.version.cuda if torch.cuda.is_available() else None,
+    }
+
+    if optimizer is not None:
+        checkpoint['optimizer_state_dict'] = optimizer.state_dict(),
+    
+    # 添加额外的元数据
+    if additional_info is not None:
+        checkpoint.update(additional_info)
+    
+    # 保存检查点
+    torch.save(checkpoint, path)
+    print(f"检查点已保存到: {path}")
+    print(f"保存时间: {checkpoint['save_datetime']}")
+
+def load_weight(net, pth_file, optimizer = None, map_location = None):
     # 加载预训练权重（如果提供了checkpoint文件）
     start_epoch = 0
     loaded = False
     if pth_file and os.path.exists(pth_file):
         print(f"Loading pretrained weights from {pth_file}")
-        checkpoint = torch.load(pth_file, map_location=map_location)
+        checkpoint = torch.load(pth_file, map_location=map_location, weights_only=False)
         
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             # 完整checkpoint格式（包含优化器状态等）
             net.load_state_dict(checkpoint['model_state_dict'])
             if 'epoch' in checkpoint:
                 start_epoch = checkpoint['epoch'] + 1
+            if 'optimizer_state_dict' in checkpoint and optimizer is not None:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
             print(f"Resuming training from epoch {start_epoch}")
         else:
             # 只有模型权重的格式
@@ -120,7 +159,7 @@ def train_with_CIFAR10(net, num_classes=10):
     test_net(net, test_loader=test_loader)
 
 from torch.amp import autocast, GradScaler
-def train_with_ImageNet(net, num_classes=1000, batch_size=200, epoch_max=20):
+def train_with_ImageNet(net, optimizer, num_classes=1000, batch_size=200, epoch_max=20, epoch_begin =  0):
     #num_classes = 1000 #ImageNet数据集包含1000中类型的图片
     #==================加载ImageNet数据集==============================
     # 使用ImageNet特定的数据增强
@@ -144,16 +183,17 @@ def train_with_ImageNet(net, num_classes=1000, batch_size=200, epoch_max=20):
     test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False, num_workers=12)
     # ---------------for ImageNet------------------
     # 使用更适合ImageNet的优化器设置
-    optimizer = torch.optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
     scaler = GradScaler() #使用梯度缩放器，用于混合精度訓練
     cross = nn.CrossEntropyLoss().to(device)
+    batch_count = 0
     for epoch in range(epoch_max):
+        epoch = epoch + epoch_begin
         net.train()
         running_loss = 0.0
         correct = 0
         total = 0
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epoch_max}')
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epoch_max+epoch_begin}')
         for batch_idx, (img, label) in enumerate(pbar):
         #for batch_idx,(img, label) in enumerate(tqdm(train_loader)):
             img = img.to(device)
@@ -174,6 +214,9 @@ def train_with_ImageNet(net, num_classes=1000, batch_size=200, epoch_max=20):
             total += label.size(0)
             correct += predicted.eq(label).sum().item()
             #print(f'Epoch: {epoch} batch_idx: {batch_idx} running_loss: {running_loss} running_acc: {100. * correct / total}')
+            writer.add_scalar('Acc/batch', 100. * (correct / total))
+            if batch_idx==10:
+                save_checkpoint_with_metadata(net, epoch=epoch, path=f'temp/mobilenetv3_epoch{epoch}.pth', optimizer=optimizer)
         
         train_acc = 100. * correct / total
         avg_loss = running_loss / len(train_loader)
@@ -181,8 +224,9 @@ def train_with_ImageNet(net, num_classes=1000, batch_size=200, epoch_max=20):
         print(f"Epoch: {epoch + 1}, Loss: {avg_loss:.4f}, Train Acc: {train_acc:.2f}%")
         scheduler.step()
         os.makedirs('temp', exist_ok=True)
-        torch.save(net.state_dict(), f'temp/mobilenetv3_epoch{epoch}.pth')
-        print(f"Model saved to temp/mobilenetv3_epoch{epoch}.pth")
+        #torch.save(net.state_dict(), f'temp/mobilenetv3_epoch{epoch}.pth')
+        #print(f"Model saved to temp/mobilenetv3_epoch{epoch}.pth")
+        save_checkpoint_with_metadata(net, epoch=epoch, path=f'temp/mobilenetv3_epoch{epoch}.pth', optimizer=optimizer)
 
         writer.add_scalar('Loss/train', avg_loss, epoch)
         writer.add_scalar('Acc/train', train_acc, epoch)
@@ -200,6 +244,7 @@ if __name__ == '__main__':
     parser.add_argument('--data-dir', type=str, required=True, help='Path to ImageNet dataset')
     parser.add_argument('--pth-file', type=str, required=False, help='Path to pretrained checkpoint file')
     parser.add_argument('--export-onnx-path', type=str, help='Path to save ONNX model')
+    parser.add_argument('--epochs', type=int, required=True,  help='epochs count for training')
     args = parser.parse_args()
 
     ##==================创建net==============================
@@ -217,18 +262,20 @@ if __name__ == '__main__':
 
     device = torch.device(f'cuda')
     net = net.to(device)
-    loaded,net,startEpoch = load_weight(net, args.pth_file, device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
+    loaded,net,startEpoch = load_weight(net, args.pth_file, optimizer=optimizer, map_location=device)
     if loaded:
         print(f"load model weight success. file={args.pth_file}")
     print(net)
     #train_with_CIFAR10(net)
-    train_with_ImageNet(net, batch_size=200)
+    train_with_ImageNet(net, optimizer, batch_size=256, epoch_max=args.epochs, epoch_begin=startEpoch)
     
     #======================保存pth==========================
     # Create output directory and save model
     os.makedirs('output/models', exist_ok=True)
-    torch.save(net.state_dict(), 'output/models/mobilenetv3.pth')
-    print("Model saved to output/models/mobilenetv3.pth")
+    #torch.save(net.state_dict(), 'output/models/mobilenetv3.pth')
+    #print("Model saved to output/models/mobilenetv3.pth")
+    save_checkpoint_with_metadata(net, epoch=startEpoch+args.epochs -1, path='output/models/MobileNetV3_202509.pth')
 
     #=====================导出onnx==========================
     # Export to ONNX if requested
