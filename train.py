@@ -69,7 +69,7 @@ def save_checkpoint_with_metadata(model, epoch, path, optimizer = None, loss = N
     }
 
     if optimizer is not None:
-        checkpoint['optimizer_state_dict'] = optimizer.state_dict(),
+        checkpoint['optimizer_state_dict'] = optimizer.state_dict()
     
     # 添加额外的元数据
     if additional_info is not None:
@@ -279,8 +279,8 @@ if __name__ == '__main__':
 
     #=====================导出onnx==========================
     # Export to ONNX if requested
-    #input_picture_shape = (3, 224, 224) # ImageNet数据集标准训练输入尺寸
-    input_picture_shape = (3, 32, 32) # CIFAR10数据集的图片是32x32的rgb
+    input_picture_shape = (3, 224, 224) # ImageNet数据集标准训练输入尺寸
+    #input_picture_shape = (3, 32, 32) # CIFAR10数据集的图片是32x32的rgb
     if args.export_onnx_path:
         os.makedirs(os.path.dirname(args.export_onnx_path), exist_ok=True)
         dummy_input = torch.randn(1, *input_picture_shape).to(device)  # CIFAR10 input size
